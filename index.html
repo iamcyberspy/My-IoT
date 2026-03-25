@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PID Simulator V3.4: Visual Sync Fix</title>
+    <style>
+        :root {
+            --bg: #121212;
+            --panel: #1e1e1e;
+            --text: #e0e0e0;
+            --accent: #00ff9d;
+            --danger: #ff4444;
+            --input-bg: #333;
+        }
+        body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Segoe UI', monospace; height: 100vh; display: flex; overflow: hidden; user-select: none; }
+        
+        .sidebar { width: 340px; background: var(--panel); padding: 15px; border-right: 1px solid #333; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+        .main-view { flex: 1; position: relative; display: flex; flex-direction: column; }
+        .viewport { flex: 1; position: relative; background: #222; overflow: hidden; }
+        
+        canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+        
+        h2 { margin: 0; color: var(--accent); border-bottom: 1px solid #444; padding-bottom: 5px; }
+        .section { background: #2a2a2a; padding: 10px; border-radius: 6px; border: 1px solid #333; }
+        
+        .control-group { margin-bottom: 12px; }
+        .control-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
+        .control-header label { font-weight: bold; color: var(--accent); }
+        
+        input[type=number] { width: 70px; background: var(--input-bg); border: 1px solid #555; color: white; padding: 4px; border-radius: 4px; text-align: right; font-family: monospace; font-size: 1em; }
+        input[type=number]:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+        input[type=range] { width: 100%; cursor: pointer; accent-color: var(--accent); margin: 0; display: block; }
+        
+        .row { display: flex; justify-content: space-between; font-size: 0.9em; margin-bottom: 5px; }
+        button { width: 100%; padding: 8px; margin-top: 5px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.1s; }
+        button:active { transform: scale(0.98); }
+        .btn-run { background: var(--accent); color: #000; }
+        .btn-reset { background: var(--danger); color: white; }
+        .btn-map { background: #444; color: white; margin-bottom: 4px; }
+
+        .sensor-viz { display: flex; gap: 2px; height: 15px; margin-top: 5px; }
+        .s-box { flex: 1; background: #444; position: relative; }
+        .s-val { position: absolute; bottom: 0; width: 100%; background: var(--accent); transition: height 0.05s linear; }
+
+        #overlay { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); padding: 8px; border-radius: 4px; z-index: 10; font-size: 0.8em; pointer-events: none; border-left: 3px solid var(--accent); }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <h2>PID Tuner V3.4</h2>
+    
+    <div class="section">
+        <div class="row">Status: <span id="st_sys" style="color:#aaa">Idle</span></div>
+        <div class="row">Error: <span id="st_error">0.00</span></div>
+    </div>
+
+    <div class="section">
+        <div class="control-group">
+            <div class="control-header"><label>Kp</label><input type="number" id="num_kp" value="10" step="0.1"></div>
+            <input type="range" id="rng_kp" min="0" max="100" step="0.1" value="10">
+        </div>
+        <div class="control-group">
+            <div class="control-header"><label>Ki</label><input type="number" id="num_ki" value="0" step="0.001"></div>
+            <input type="range" id="rng_ki" min="0" max="1" step="0.001" value="0">
+        </div>
+        <div class="control-group">
+            <div class="control-header"><label>Kd</label><input type="number" id="num_kd" value="0" step="0.5"></div>
+            <input type="range" id="rng_kd" min="0" max="500" step="1" value="0">
+        </div>
+        <div class="control-group">
+            <div class="control-header"><label>Speed</label><input type="number" id="num_sp" value="3" step="0.1" max="10"></div>
+            <input type="range" id="rng_sp" min="1" max="10" step="0.5" value="3">
+        </div>
+    </div>
+
+    <div class="section">
+        <div>Sensor View</div>
+        <div class="sensor-viz" id="sensor_ui"></div>
+    </div>
+
+    <div class="section">
+        <button class="btn-map" onclick="setMap('circle')">Map: Circle</button>
+        <button class="btn-map" onclick="setMap('infinity')">Map: Figure 8</button>
+        <button class="btn-map" onclick="setMap('draw')">Map: Draw Mode</button>
+    </div>
+
+    <button class="btn-run" id="btn_toggle">START / STOP</button>
+    <button class="btn-reset" onclick="resetRobot()">RESET ROBOT</button>
+</div>
+
+<div class="main-view">
+    <div class="viewport" id="vp">
+        <canvas id="cvs_track"></canvas>
+        <canvas id="cvs_robot"></canvas>
+        <div id="overlay">V3.4: Fixed Sensor Sync Issue</div>
+    </div>
+</div>
+
+<script>
+    const CFG = { sensorCount: 5, sensorSpacing: 9, sensorDist: 22 };
+
+    let state = {
+        running: false,
+        isDragging: false,
+        isDrawing: false,
+        drawMode: false,
+        robot: { x: 0, y: 0, a: 0 }, 
+        dragOffset: { x: 0, y: 0 },
+        pid: { kp: 10, ki: 0, kd: 0, p:0, i:0, d:0, lastErr:0 },
+        speed: 3,
+        sensors: [0,0,0,0,0], 
+        sensorPos: [] 
+    };
+
+    const vp = document.getElementById('vp');
+    const cvsT = document.getElementById('cvs_track');
+    const ctxT = cvsT.getContext('2d');
+    const cvsR = document.getElementById('cvs_robot');
+    const ctxR = cvsR.getContext('2d');
+    const uiSensors = document.getElementById('sensor_ui');
+    
+    // Create UI bars
+    uiSensors.innerHTML = '';
+    for(let i=0; i<CFG.sensorCount; i++) uiSensors.innerHTML += `<div class="s-box"><div class="s-val" style="height:0%"></div></div>`;
+
+    function resize() {
+        cvsT.width = cvsR.width = vp.clientWidth;
+        cvsT.height = cvsR.height = vp.clientHeight;
+        if(!state.running) setMap('circle');
+    }
+    window.addEventListener('resize', resize);
+
+    function setMap(type) {
+        state.running = false;
+        state.drawMode = (type === 'draw');
+        ctxT.fillStyle = 'white'; ctxT.fillRect(0, 0, cvsT.width, cvsT.height);
+        
+        if(!state.drawMode) {
+            ctxT.beginPath(); ctxT.strokeStyle = 'black'; ctxT.lineWidth = 25; ctxT.lineCap = 'round'; ctxT.lineJoin = 'round';
+            let cx = cvsT.width/2, cy = cvsT.height/2;
+            if(type === 'circle') ctxT.arc(cx, cy, 180, 0, Math.PI*2);
+            else if(type === 'infinity') {
+                for(let t=0; t<6.3; t+=0.02) {
+                    let x = cx + 220 * Math.cos(t);
+                    let y = cy + 120 * Math.sin(2*t);
+                    t===0 ? ctxT.moveTo(x,y) : ctxT.lineTo(x,y);
+                }
+            }
+            ctxT.stroke();
+        }
+        resetRobot();
+    }
+
+    function resetRobot() {
+        state.robot.x = cvsT.width/2;
+        state.robot.y = cvsT.height/2 + 180;
+        state.robot.a = 0;
+        state.pid.i = 0; state.pid.lastErr = 0;
+        
+        // Force update immediately
+        calculateSensors(); 
+        draw();
+    }
+
+    // --- Core Logic ---
+    function update() {
+        // 1. Always update sensor positions (Fixes sync issue)
+        calculateSensors();
+
+        // 2. If running, calculate PID move
+        if (state.running && !state.isDragging) {
+            calculateMovement();
+        }
+
+        draw();
+        requestAnimationFrame(update);
+    }
+
+    function calculateSensors() {
+        let startOffset = -((CFG.sensorCount-1) * CFG.sensorSpacing) / 2;
+        state.sensorPos = [];
+        let sumVal=0, sumW=0;
+
+        for(let i=0; i<CFG.sensorCount; i++) {
+            let side = startOffset + (i * CFG.sensorSpacing);
+            // Math for sensor position relative to robot center/angle
+            let gx = state.robot.x + (CFG.sensorDist * Math.cos(state.robot.a)) - (side * Math.sin(state.robot.a));
+            let gy = state.robot.y + (CFG.sensorDist * Math.sin(state.robot.a)) + (side * Math.cos(state.robot.a));
+            
+            state.sensorPos.push({x:gx, y:gy});
+
+            if(gx>=0 && gx<cvsT.width && gy>=0 && gy<cvsT.height) {
+                let p = ctxT.getImageData(gx, gy, 1, 1).data;
+                let val = 1.0 - (p[0]/255); 
+                state.sensors[i] = val;
+                if(val > 0.3) { sumVal += val; sumW += val * (i - 2); }
+            } else { state.sensors[i] = 0; }
+        }
+
+        // Calculate Error for UI
+        let error = 0;
+        if(sumVal > 0.1) error = (sumW / sumVal) / 2.0; 
+        else if(state.pid.lastErr > 0) error = 1; else error = -1;
+
+        document.getElementById('st_error').innerText = error.toFixed(3);
+        let bars = uiSensors.children;
+        for(let i=0; i<CFG.sensorCount; i++) bars[i].firstChild.style.height = (state.sensors[i]*100)+'%';
+    }
+
+    function calculateMovement() {
+        // Re-calc error for PID logic (same as above but strictly for physics)
+        let sumVal=0, sumW=0;
+        state.sensors.forEach((val, i) => {
+            if(val > 0.3) { sumVal += val; sumW += val * (i - 2); }
+        });
+
+        let error = 0;
+        if(sumVal > 0.1) error = (sumW / sumVal) / 2.0; 
+        else if(state.pid.lastErr > 0) error = 1; else error = -1;
+
+        let P = error * state.pid.kp;
+        state.pid.i = Math.max(-10, Math.min(10, state.pid.i + error));
+        let I = state.pid.i * state.pid.ki;
+        let D = (error - state.pid.lastErr) * state.pid.kd;
+        state.pid.lastErr = error;
+        
+        let turn = (P + I + D) * 0.1;
+        let sp = parseFloat(state.speed);
+        let mL = sp + turn, mR = sp - turn;
+        let vel = (mL + mR) / 2;
+        let rot = (mL - mR) * 0.04;
+
+        state.robot.a += rot;
+        state.robot.x += Math.cos(state.robot.a) * vel;
+        state.robot.y += Math.sin(state.robot.a) * vel;
+    }
+
+    function draw() {
+        ctxR.clearRect(0,0,cvsR.width, cvsR.height);
+        
+        // Draw Sensors (Dots) - Draw BEFORE robot to check alignment
+        state.sensorPos.forEach((p,i) => {
+            ctxR.beginPath();
+            ctxR.fillStyle = state.sensors[i]>0.5 ? '#00ff00' : '#ff4444'; // Green=Black, Red=White
+            ctxR.arc(p.x, p.y, 3, 0, 6.3);
+            ctxR.fill();
+        });
+
+        // Draw Robot
+        ctxR.save();
+        ctxR.translate(state.robot.x, state.robot.y);
+        ctxR.rotate(state.robot.a);
+
+        ctxR.shadowBlur = state.isDragging ? 20 : 0;
+        ctxR.shadowColor = 'rgba(0, 255, 157, 0.6)';
+        ctxR.fillStyle = state.isDragging ? '#ffffff' : '#00ff9d';
+        ctxR.fillRect(-15, -10, 30, 20); // Body
+        
+        ctxR.fillStyle = '#444';
+        ctxR.fillRect(-10, -14, 20, 4); // Wheels
+        ctxR.fillRect(-10, 10, 20, 4);
+        
+        // Direction Arrow
+        ctxR.fillStyle = 'black';
+        ctxR.beginPath(); ctxR.moveTo(5,0); ctxR.lineTo(10,0); ctxR.stroke();
+
+        ctxR.restore();
+    }
+
+    // --- Inputs Handling ---
+    function bindInputs(key, numId, rngId) {
+        const num = document.getElementById(numId);
+        const rng = document.getElementById(rngId);
+        rng.addEventListener('input', () => {
+            let v = parseFloat(rng.value); num.value = v;
+            state.pid[key] !== undefined ? state.pid[key]=v : state[key]=v;
+        });
+        num.addEventListener('input', () => {
+            let v = parseFloat(num.value); if(isNaN(v)) return;
+            rng.value = v;
+            state.pid[key] !== undefined ? state.pid[key]=v : state[key]=v;
+        });
+    }
+    bindInputs('kp', 'num_kp', 'rng_kp');
+    bindInputs('ki', 'num_ki', 'rng_ki');
+    bindInputs('kd', 'num_kd', 'rng_kd');
+    bindInputs('speed', 'num_sp', 'rng_sp');
+
+    // --- Mouse Interaction ---
+    vp.addEventListener('mousedown', e => {
+        e.preventDefault(); 
+        const r = vp.getBoundingClientRect();
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+
+        const dist = Math.hypot(mx - state.robot.x, my - state.robot.y);
+        if(dist < 50) { 
+            state.isDragging = true;
+            state.running = false;
+            state.dragOffset.x = mx - state.robot.x;
+            state.dragOffset.y = my - state.robot.y;
+            vp.style.cursor = "grabbing";
+        } else if(state.drawMode) {
+            state.isDrawing = true;
+            ctxT.beginPath(); ctxT.moveTo(mx, my);
+            ctxT.strokeStyle = 'black'; ctxT.lineWidth = 25; ctxT.lineCap = 'round';
+        }
+    });
+
+    window.addEventListener('mousemove', e => {
+        const r = vp.getBoundingClientRect();
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+
+        if(state.isDragging) {
+            state.robot.x = mx - state.dragOffset.x;
+            state.robot.y = my - state.dragOffset.y;
+            state.pid.i = 0; state.pid.lastErr = 0;
+        } else if(state.isDrawing) {
+            ctxT.lineTo(mx, my); ctxT.stroke();
+        } else {
+            const dist = Math.hypot(mx - state.robot.x, my - state.robot.y);
+            vp.style.cursor = dist < 50 ? "grab" : (state.drawMode ? "crosshair" : "default");
+        }
+    });
+
+    window.addEventListener('mouseup', () => {
+        state.isDragging = false;
+        state.isDrawing = false;
+        vp.style.cursor = "default";
+    });
+
+    vp.addEventListener('wheel', e => {
+        if(!state.running) {
+            e.preventDefault();
+            state.robot.a += e.deltaY * 0.001;
+        }
+    }, {passive:false});
+    
+    document.getElementById('btn_toggle').addEventListener('click', ()=>{
+        state.running = !state.running;
+        document.getElementById('st_sys').innerText = state.running ? "RUNNING" : "PAUSED";
+    });
+
+    resize();
+    requestAnimationFrame(update);
+
+</script>
+</body>
+</html>
